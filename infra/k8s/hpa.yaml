@@ -1,0 +1,47 @@
+# =========================================================
+# hpa.yaml — Horizontal Pod Autoscaler for meeting-api
+#
+# Goal:
+#   - Keep minimum 2 pods running
+#   - Automatically scale up when CPU usage increases
+#
+# Requirements:
+#   - metrics-server must be installed in the cluster
+#   - meeting-api Deployment must have CPU requests set (we already set requests.cpu)
+# =========================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: meeting-api-hpa               # Name of the HPA object
+  namespace: meeting                  # Same namespace where meeting-api runs
+spec:
+  scaleTargetRef:                     # What this HPA controls
+    apiVersion: apps/v1
+    kind: Deployment
+    name: meeting-api                 # Target Deployment name (must match exactly)
+
+  minReplicas: 2                      # ✅ Always keep at least 2 pods (your requirement)
+  maxReplicas: 6                      # Max pods allowed (tune based on VM size)
+
+  metrics:                            # What metric(s) to use for scaling
+    - type: Resource                  # Resource-based scaling
+      resource:
+        name: cpu                     # Scale based on CPU utilization
+        target:
+          type: Utilization
+          averageUtilization: 60      # Target: keep average CPU ~60% across pods
+
+  behavior:                           # Optional advanced control (smooth scaling)
+    scaleUp:
+      stabilizationWindowSeconds: 0   # React quickly to load spikes
+      policies:
+        - type: Percent
+          value: 100                  # Can double replicas at once
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 120 # Avoid flapping (wait 2 min before scaling down)
+      policies:
+        - type: Percent
+          value: 50                   # Reduce at most 50% per minute
+          periodSeconds: 60

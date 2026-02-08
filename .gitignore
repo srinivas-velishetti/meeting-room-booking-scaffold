@@ -1,0 +1,8 @@
+# Nodei
+node_modules/
+dist/
+.vite/
+
+# Java
+target/
+*.log

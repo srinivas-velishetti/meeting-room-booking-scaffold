@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../frontend-projects/video-library-project-react"
+		},
+		{
+			"path": "../infra"
+		}
+	],
+	"settings": {}
+}

@@ -1,0 +1,49 @@
+# ---------------------------------------------------------
+# 1) Ingress — external access (recommended for cloud)
+# ---------------------------------------------------------
+# Ingress exposes your UI (and API) over a single public hostname.
+# k3s includes Traefik ingress by default.
+#
+# How it works:
+#   Browser -> http(s)://<host>/
+#              -> Ingress routes "/" to meeting-ui service
+#   Browser -> http(s)://<host>/api/...
+#              -> Ingress routes "/api" to meeting-api service
+#
+# Use nip.io for free host without buying a domain:
+#   <VM_PUBLIC_IP>.nip.io
+#
+# IMPORTANT:
+# - Your backend service name below must match your API service.
+# - If your backend service is named "meeting-api", keep it as is.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: meeting-ingress
+  namespace: meeting
+  annotations:
+       # k3s default ingress controller is Traefik.
+    # "web" = port 80, "websecure" = port 443 (TLS)
+    traefik.ingress.kubernetes.io/router.entrypoints: web, websecure
+spec:
+  rules:
+    - host: <YOUR_VM_PUBLIC_IP>.nip.io
+      http:
+        paths:
+          # Route UI
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: meeting-ui
+                port:
+                  number: 80
+
+          # Route API
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: meeting-api
+                port:
+                  number: 8080

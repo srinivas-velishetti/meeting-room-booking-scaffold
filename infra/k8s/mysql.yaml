@@ -1,0 +1,146 @@
+# =========================================================
+# mysql.yaml  — MySQL in Kubernetes (internal-only, persistent)
+# Purpose:
+#   - Run MySQL as a pod inside the Kubernetes cluster
+#   - Persist data using a PVC (so DB survives pod restarts)
+#   - Expose MySQL ONLY inside the cluster via ClusterIP Service
+#   - Store credentials in a Secret (not hardcoded in deployment)
+# =========================================================
+
+
+# ---------------------------------------------------------
+# 1) NAMESPACE
+# ---------------------------------------------------------
+apiVersion: v1               # API group/version for core Kubernetes objects
+kind: Namespace              # Namespace is a logical boundary (like a folder) in k8s
+metadata:
+  name: meeting              # All resources below are created inside "meeting" namespace
+                             # Benefit: clean isolation + easy cleanup (kubectl delete ns meeting)
+
+
+# ---------------------------------------------------------
+# 2) PERSISTENT VOLUME CLAIM (PVC)
+# ---------------------------------------------------------
+# Problem: Pods are ephemeral. If MySQL pod is recreated, all data in the container filesystem is lost.
+# Solution: PVC requests storage from the cluster (backed by a PersistentVolume).
+# In k3s, default storage class is usually "local-path" which provisions local disk storage on the node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc            # Name of the claim; referenced later by the Deployment
+  namespace: meeting
+spec:
+  accessModes:
+    - ReadWriteOnce          # RWO means the volume can be mounted read-write by ONE node/pod at a time.
+                             # MySQL is stateful, so RWO is the correct mode for single-instance DB.
+  resources:
+    requests:
+      storage: 10Gi          # Requested storage size. Pick small for free cloud; increase if needed.
+
+
+# ---------------------------------------------------------
+# 3) SECRET (MySQL credentials + initial DB config)
+# ---------------------------------------------------------
+# Secrets are used for sensitive values. They are base64-encoded in etcd by default.
+# MySQL official container image supports these env vars to auto-create database/user on first startup.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret         # Secret name; referenced later via envFrom
+  namespace: meeting
+type: Opaque                 # Generic secret type for arbitrary key-value pairs
+stringData:                  # stringData allows plain text; Kubernetes stores as base64 in "data"
+  MYSQL_ROOT_PASSWORD: root  # Root password (admin). Use strong password in real deployments.
+  MYSQL_DATABASE: meeting    # Database created automatically when container starts first time
+  MYSQL_USER: app            # App user created automatically
+  MYSQL_PASSWORD: app        # Password for app user
+
+
+# ---------------------------------------------------------
+# 4) DEPLOYMENT (runs MySQL container)
+# ---------------------------------------------------------
+# Deployment ensures desired state: "keep 1 MySQL pod running".
+# If the pod crashes or node reboots, it will be recreated automatically.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql                # Deployment name
+  namespace: meeting
+spec:
+  replicas: 1                # Single replica (simplest/cheapest). MySQL HA requires StatefulSet + replication.
+  selector:
+    matchLabels:
+      app: mysql             # Deployment manages pods that have label app=mysql
+  template:                  # Pod template used to create pods
+    metadata:
+      labels:
+        app: mysql           # Label applied to the pod (very important: Service uses this label to route traffic)
+    spec:
+      containers:
+        - name: mysql        # Container name inside the pod
+          image: mysql:8.4   # MySQL container image version (pin version for repeatable deploys)
+
+          # envFrom imports all key/values from the Secret as environment variables in the container.
+          # This is how MySQL receives MYSQL_DATABASE/USER/PASSWORD on startup.
+          envFrom:
+            - secretRef:
+                name: mysql-secret
+
+          # containerPort is informational (and used by some tools). MySQL listens on 3306 inside the container.
+          ports:
+            - containerPort: 3306
+
+          # volumeMounts attaches the PVC-backed volume into the container filesystem.
+          # /var/lib/mysql is where MySQL stores all DB files (tables, indexes, redo logs).
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+
+          # readinessProbe: "Is this pod READY to accept traffic?"
+          # Kubernetes will NOT send connections via the Service until readiness is true.
+          # Using tcpSocket means: "can we open TCP connection to port 3306?"
+          readinessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 15  # wait before first check (MySQL takes time to boot)
+            periodSeconds: 5         # check every 5 seconds
+
+          # livenessProbe: "Is this pod still ALIVE/healthy?"
+          # If this probe fails repeatedly, Kubernetes restarts the container.
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30  # give MySQL more time before liveness checks
+            periodSeconds: 10        # check every 10 seconds
+
+      # volumes section defines the volume source for the name "mysql-data" used above.
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-pvc     # binds the pod volume to the PVC created earlier
+
+
+# ---------------------------------------------------------
+# 5) SERVICE (internal networking endpoint for MySQL)
+# ---------------------------------------------------------
+# Problem: Pod IPs change when pods restart. You can't hardcode pod IP.
+# Solution: A Service provides:
+#   - stable virtual IP inside cluster (ClusterIP)
+#   - stable DNS name: "mysql" (and full name mysql.meeting.svc.cluster.local)
+      # Kubernetes created the service subdomain - svc 
+      #<service>.<namespace>.svc.<cluster-domain> -> <mysql>.<meeting>.svc.<cluster.local>
+# Default type is ClusterIP when 'type' is omitted.
+# ClusterIP means: only accessible inside the cluster (api-service can connect; internet cannot).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql                # DNS name inside the namespace: mysql
+  namespace: meeting
+spec:
+  # type is omitted -> defaults to ClusterIP (internal-only). This is best practice for databases.
+  selector:
+    app: mysql                # Route traffic to pods with label app=mysql
+  ports:
+    - name: mysql             # Named port (nice for readability)
+      port: 3306              # Port exposed by Service (clients connect to this)
+      targetPort: 3306        # Port on the MySQL container

@@ -1,0 +1,18 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: api-service
+  profiles:
+    default: local
+app:
+  security:
+    jwt:
+      issuer: meeting-room-booking
+      secret: "change-me-in-prod-change-me-in-prod-change-me-in-prod"
+      expirySeconds: 3600
+  kafka:
+    bookingTopic: booking-events
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

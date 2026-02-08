@@ -1,0 +1,135 @@
+# =========================================================
+# api-service.yaml — Spring Boot API on Kubernetes
+#
+# What you get:
+#   - 2 API pods for HPA (Horizontal Pod Autoscaler) + load balancing
+#   - ClusterIP Service that load-balances traffic across pods
+#   - Health probes (readiness/liveness)
+#   - Env vars wired to MySQL + Kafka using Kubernetes DNS
+#
+# Assumptions:
+#   - MySQL Service name: mysql (namespace: meeting)
+#   - Kafka Service name: kafka (namespace: meeting)
+#   - Backend container listens on port 8080
+# =========================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-api
+  namespace: meeting
+  labels:
+    app: meeting-api
+spec:
+  replicas: 2  # ✅ Two pods (K8s Service will load-balance across these)
+  selector:
+    matchLabels:
+      app: meeting-api
+  template:
+    metadata:
+      labels:
+        app: meeting-api
+    spec:
+      # If your container registry is private (GHCR private), enable imagePullSecrets:
+      # imagePullSecrets:
+      #   - name: ghcr-secret
+
+      containers:
+        - name: api
+          image: ghcr.io/<your-github>/meeting-api:1.0.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # -----------------------------
+          # Environment variables
+          # -----------------------------
+          env:
+            # Active profile for Kubernetes (optional)
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+
+            # ---- MySQL connection (internal DNS: mysql:3306)
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:mysql://mysql:3306/meeting?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+            - name: SPRING_DATASOURCE_USERNAME
+              value: "app"
+            - name: SPRING_DATASOURCE_PASSWORD
+              value: "app"
+
+            # ---- Kafka bootstrap (internal DNS: kafka:9092)
+            - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+
+            # ---- Optional: show more logs (can remove later)
+            - name: LOGGING_LEVEL_ROOT
+              value: "INFO"
+            - name: LOGGING_LEVEL_COM_SV_MEETING
+              value: "DEBUG"
+
+          # -----------------------------
+          # Readiness probe
+          # - Controls when pod starts receiving traffic from Service
+          # -----------------------------
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+
+          # -----------------------------
+          # Liveness probe
+          # - Restarts the pod if it gets stuck
+          # -----------------------------
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+
+          # -----------------------------
+          # Resource requests/limits (free-cloud friendly)
+          # -----------------------------
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+
+---
+# =========================================================
+# Service — internal load balancer across API pods
+#
+# Key point:
+# - This Service creates a stable DNS name:
+#     meeting-api.meeting.svc.cluster.local
+# - And load-balances traffic across the 2 pods automatically.
+# - Ingress will route /api to this Service on port 8080.
+# =========================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-api
+  namespace: meeting
+  labels:
+    app: meeting-api
+spec:
+  #type: LoadBalancer  # ✅ Exposes the service externally with a cloud load balancer (optional, can be ClusterIP for internal only)
+  type: ClusterIP  # ✅ Default; internal load balancing across pods
+  selector:
+    app: meeting-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

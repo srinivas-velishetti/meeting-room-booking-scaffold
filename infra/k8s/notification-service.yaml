@@ -1,0 +1,161 @@
+# =========================================================
+# notification-service.yaml — Kafka Consumer + Email Sender
+#
+# Goal:
+#   - Consume booking events from Kafka topic (e.g., booking-events)
+#   - Send email notifications via SMTP
+#
+# Security/Best Practices:
+#   - SMTP username/password stored in Kubernetes Secret (not in YAML)
+#   - Service is ClusterIP (internal-only)
+#   - Readiness/liveness probes for reliability
+# =========================================================
+
+# ---------------------------------------------------------
+# 1) Secret for SMTP credentials (DO NOT hardcode passwords)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: notification-secret
+  namespace: meeting
+type: Opaque
+stringData:
+  # SMTP credentials for sending email
+  SMTP_USERNAME: "your-smtp-user@example.com"
+  SMTP_PASSWORD: "your-smtp-password"
+
+  # Optional: if your app supports API keys, store them here instead
+  # SMTP_API_KEY: "xxxx"
+
+---
+# ---------------------------------------------------------
+# 2) Deployment — runs notification-service
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: meeting
+  labels:
+    app: notification-service
+spec:
+  replicas: 1
+  # One replica is fine for free cloud demo.
+  # You can scale to 2 later (ensure consumer group works correctly).
+
+  selector:
+    matchLabels:
+      app: notification-service
+
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      # If your registry is private (GHCR private), enable imagePullSecrets:
+      # imagePullSecrets:
+      #   - name: ghcr-secret
+
+      containers:
+        - name: notification
+          image: ghcr.io/<your-github>/meeting-notification-service:1.0.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8081
+              # Notification service (Spring Boot) port
+
+          env:
+            # -----------------------------
+            # App profile
+            # -----------------------------
+            - name: SPRING_PROFILES_ACTIVE
+              value: "k8s"
+
+            # -----------------------------
+            # Kafka connection (internal DNS)
+            # -----------------------------
+            - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+
+            # Topic your consumer reads from
+            - name: APP_KAFKA_BOOKING_TOPIC
+              value: "booking-events"
+
+            # Consumer group id (important for scaling multiple replicas)
+            - name: SPRING_KAFKA_CONSUMER_GROUP_ID
+              value: "meeting-notification-group"
+
+            # -----------------------------
+            # SMTP configuration
+            # -----------------------------
+            # Example for Gmail SMTP:
+            # host=smtp.gmail.com, port=587, starttls=true
+            - name: SMTP_HOST
+              value: "smtp.gmail.com"
+            - name: SMTP_PORT
+              value: "587"
+            - name: SMTP_STARTTLS
+              value: "true"
+            - name: SMTP_FROM
+              value: "your-smtp-user@example.com"
+
+          envFrom:
+            # Pull SMTP username/password from secret
+            - secretRef:
+                name: notification-secret
+
+          # -----------------------------
+          # Probes: keep pod reliable
+          # -----------------------------
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+
+          resources:
+            # Keep light for free cloud
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "300m"
+              memory: "512Mi"
+
+---
+# ---------------------------------------------------------
+# 3) Service — internal-only endpoint (ClusterIP)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: meeting
+  labels:
+    app: notification-service
+spec:
+  type: ClusterIP
+  # ClusterIP = internal only. You generally don't expose notification service publicly.
+
+  selector:
+    app: notification-service
+
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081

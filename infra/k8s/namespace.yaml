@@ -1,0 +1,17 @@
+# =========================================================
+# frontend.yaml — React UI Deployment on Kubernetes
+#
+# What this file does:
+#   1) Creates/uses the "meeting" namespace
+# =========================================================
+
+
+# ---------------------------------------------------------
+# 1) Namespace (optional if already created)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meeting
+  # Namespace is a logical boundary. Keeps UI/API/MySQL/Kafka resources isolated.
+  # If you already created it (e.g., in mysql.yaml), you can remove this block.

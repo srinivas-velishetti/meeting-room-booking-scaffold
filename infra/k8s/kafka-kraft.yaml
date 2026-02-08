@@ -1,0 +1,225 @@
+# =========================================================
+# kafka-kraft.yaml — Kafka in KRaft mode (NO ZooKeeper)
+#
+# What you get:
+#   - 1 Kafka pod running as BOTH controller + broker
+#   - Persistent storage (PVC)
+#   - Internal-only access using ClusterIP Service + DNS name "kafka"
+#
+# KRaft notes:
+#   - KRaft replaces ZooKeeper
+#   - Requires a unique CLUSTER_ID
+#   - Uses "controller.quorum.voters" config
+# =========================================================
+
+# ---------------------------------------------------------
+# 1) Namespace (optional if already created)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meeting # All kafka resources will live in the 'meeting' namespace
+
+---
+# ---------------------------------------------------------
+# 2) Headless Service for StatefulSet (stable DNS per pod)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless         # Headless service name
+  namespace: meeting
+spec:
+  clusterIP: None              # Headless means: no load-balancing IP, only DNS to pod IPs
+  selector:
+    app: kafka                 # This service targets pods labeled app=kafka
+  ports:
+    - name: kafka
+      port: 9092               # Broker port (clients produce/consume)
+      targetPort: 9092
+    - name: controller
+      port: 9093               # Controller port (KRaft internal quorum)
+      targetPort: 9093
+
+---
+# ---------------------------------------------------------
+# 3) Normal Service for clients inside cluster
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka                  # This becomes DNS name: kafka.meeting.svc.cluster.local
+  namespace: meeting
+spec:
+  # Default type is ClusterIP (internal only). This is best practice for Kafka inside cluster.
+  selector:
+    app: kafka                 # Routes traffic to kafka pods
+  ports:
+    - name: kafka
+      port: 9092               # Clients connect to kafka:9092
+      targetPort: 9092
+
+---
+# ---------------------------------------------------------
+# 4) StatefulSet (best for stateful systems like Kafka)
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: meeting
+spec:
+  serviceName: kafka-headless  # Ties StatefulSet to headless service for stable DNS
+  replicas: 1                  # Single node (dev/demo). For HA: 3 controllers + 3 brokers.
+  selector:
+    matchLabels:
+      app: kafka               # Pod label selector
+  template:
+    metadata:
+      labels:
+        app: kafka             # Pods will have label app=kafka (used by services above)
+    spec:
+      containers:
+        - name: kafka
+          # Bitnami Kafka image supports KRaft via env vars cleanly
+          image: bitnami/kafka:3.7.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: kafka
+              containerPort: 9092   # Broker port
+            - name: controller
+              containerPort: 9093   # Controller port
+
+          env:
+            # ---------------------------------------------
+            # KRaft Mode Enablement
+            # ---------------------------------------------
+            - name: KAFKA_ENABLE_KRAFT
+              value: "yes"          # Turn on KRaft mode (no ZooKeeper)
+
+            - name: KAFKA_CFG_PROCESS_ROLES
+              value: "broker,controller"
+              # In single node, same process acts as broker + controller.
+              # In prod, controllers usually separate from brokers.
+
+            # ---------------------------------------------
+            # Node identity inside the quorum
+            # ---------------------------------------------
+            - name: KAFKA_CFG_NODE_ID
+              value: "0"            # Unique numeric id for this node (0 is fine for single replica)
+
+            # ---------------------------------------------
+            # KRaft cluster id (MUST be stable)
+            # ---------------------------------------------
+            - name: KAFKA_KRAFT_CLUSTER_ID
+              value: "meeting-kraft-cluster-1234567890"
+              # In real setups, generate a proper UUID:
+              #  kafka-storage.sh random-uuid
+              # But for single node dev, a stable string works.
+
+            # ---------------------------------------------
+            # Listener configuration (how Kafka listens)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+              # PLAINTEXT listens for client traffic (produce/consume)
+              # CONTROLLER listens for internal KRaft controller quorum traffic
+
+            - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+              # Maps listener names to protocols
+
+            - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+              # Defines which listener is used for the KRaft controller role
+
+            # ---------------------------------------------
+            # Advertised listeners (what clients will use)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka.meeting.svc.cluster.local:9092"
+              # IMPORTANT:
+              # Kafka tells clients "connect back to THIS address".
+              # Since our clients are inside the cluster, we advertise the ClusterIP DNS.
+
+            # ---------------------------------------------
+            # Controller quorum voters (KRaft requirement)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+              value: "0@kafka-0.kafka-headless.meeting.svc.cluster.local:9093"
+              # Format: <nodeId>@<podDNS>:<controllerPort>
+              # StatefulSet pod DNS pattern:
+              #   kafka-0.kafka-headless.meeting.svc.cluster.local
+
+            # ---------------------------------------------
+            # Where Kafka stores its logs (data)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_LOG_DIRS
+              value: "/bitnami/kafka"
+              # Bitnami stores Kafka data under /bitnami/kafka
+
+            # ---------------------------------------------
+            # Dev-friendly replication factors (single broker)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+              # __consumer_offsets topic replication factor must be 1 in single node
+
+            - name: KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+              # Transaction state topic replication also must be 1 for single node
+
+            - name: KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+              # Minimum in-sync replicas must be 1 in single broker
+
+            - name: KAFKA_CFG_MIN_INSYNC_REPLICAS
+              value: "1"
+              # Producers can require acks=all; with 1 ISR, it still works
+
+            # ---------------------------------------------
+            # Optional: auto-create topics (dev only)
+            # ---------------------------------------------
+            - name: KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+              # Convenient for dev. In prod, prefer explicit topic creation.
+
+          # ---------------------------------------------
+          # Readiness probe: when Kafka is ready
+          # ---------------------------------------------
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 20
+            periodSeconds: 5
+
+          # ---------------------------------------------
+          # Liveness probe: if Kafka hangs, restart
+          # ---------------------------------------------
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 60
+            periodSeconds: 10
+
+          # ---------------------------------------------
+          # Persist Kafka data (so messages survive pod restarts)
+          # ---------------------------------------------
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /bitnami/kafka
+
+  # -------------------------------------------------------
+  # 5) VolumeClaimTemplate (StatefulSet creates a PVC per pod)
+  # -------------------------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data           # Must match volumeMounts.name above
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi          # Small size for free cloud demo
+        # storageClassName omitted → uses cluster default (k3s: local-path)

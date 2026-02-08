@@ -1,0 +1,166 @@
+# =========================================================
+# frontend.yaml — React UI Deployment on Kubernetes
+#
+# What this file does:
+#   1) Creates/uses the "meeting" namespace
+#   2) Deploys your React UI as an NGINX container
+#   3) Exposes the UI internally via a ClusterIP Service
+#   4) (Optional) Exposes externally via Ingress (recommended for cloud)
+#
+# Assumptions:
+#   - Your frontend Docker image is already built and pushed to a registry:
+#       e.g. ghcr.io/<you>/meeting-ui:1.0.0
+#   - Your NGINX serves the built React app on port 80 inside the container.
+#   - API is reachable inside cluster at:
+#       http://meeting-api:8080   (Service name of backend)
+#
+# IMPORTANT:
+#   - React app runs in the user's browser.
+#   - So "API base URL" must be a URL reachable from the browser.
+#   - In Kubernetes cloud, that is typically an Ingress host like:
+#       https://<your-host>/api
+# =========================================================
+
+
+# ---------------------------------------------------------
+# 1) Namespace (optional if already created)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meeting
+  # Namespace is a logical boundary. Keeps UI/API/MySQL/Kafka resources isolated.
+  # If you already created it (e.g., in mysql.yaml), you can remove this block.
+
+---
+# ---------------------------------------------------------
+# 2) ConfigMap for runtime-like configuration
+# ---------------------------------------------------------
+# Why do we need this?
+# - If you build React with Vite, env vars are baked at build time.
+# - But for Kubernetes, you often want to point UI to the correct API endpoint.
+#
+# Common pattern:
+# - Serve a small config file (config.js or env.json) from NGINX
+# - UI reads it at runtime (window.__ENV__.API_BASE)
+#
+# If your scaffold currently uses VITE_API_BASE at build time ONLY:
+# - You can skip this block and bake correct API URL during image build.
+# - But for cloud deployments, runtime config is much more convenient.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: meeting
+data:
+  # This file will be mounted into the nginx html folder.
+  # Your index.html can load it with:
+  #   <script src="/config.js"></script>
+  # And your app can read:
+  #   window.__ENV__.API_BASE
+  config.js: |
+    window.__ENV__ = {
+      API_BASE: "/api"
+    };
+
+---
+# ---------------------------------------------------------
+# 3) Deployment — runs the UI container
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-ui
+  namespace: meeting
+spec:
+  replicas: 1
+  # replicas=1 is perfect for free cloud and demo.
+  # You can scale later: kubectl scale deploy meeting-ui --replicas=2 -n meeting
+
+  selector:
+    matchLabels:
+      app: meeting-ui
+      # Deployment manages pods with these labels.
+
+  template:
+    metadata:
+      labels:
+        app: meeting-ui
+        # These labels must match the selector above.
+        # Service uses these labels to route traffic.
+
+    spec:
+      # If your image registry is private (GHCR private), uncomment below:
+      # imagePullSecrets:
+      #   - name: ghcr-secret
+
+      containers:
+        - name: ui
+          # Replace this with your actual pushed image
+          image: ghcr.io/<your-github>/meeting-ui:1.0.0
+
+          imagePullPolicy: IfNotPresent
+          # IfNotPresent avoids re-pulling if the image is already cached on the node.
+
+          ports:
+            - name: http
+              containerPort: 80
+              # NGINX serves the React build on port 80 inside the container.
+
+          # Mount the runtime config into nginx web root
+          volumeMounts:
+            - name: frontend-config-volume
+              mountPath: /usr/share/nginx/html/config.js
+              subPath: config.js
+              # This maps ConfigMap's config.js to that exact file path.
+
+          # Readiness probe: "Is UI ready to serve traffic?"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          # Liveness probe: "Is container still alive?"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+          resources:
+            # Optional but recommended: keep resource usage predictable in free cloud
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+
+      volumes:
+        - name: frontend-config-volume
+          configMap:
+            name: frontend-config
+            # Connects the ConfigMap defined above.
+
+---
+# ---------------------------------------------------------
+# 4) Service — internal stable endpoint for UI
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-ui
+  namespace: meeting
+spec:
+  # Default type is ClusterIP (internal-only).
+  # This gives stable DNS inside cluster:
+  #   meeting-ui.meeting.svc.cluster.local
+  selector:
+    app: meeting-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
